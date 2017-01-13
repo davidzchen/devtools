@@ -1,0 +1,3 @@
+[submodule "buildifier"]
+	path = buildifier
+	url = https://github.com/bazelbuild/buildifier

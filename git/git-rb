@@ -1,0 +1,124 @@
+#!/bin/sh
+#
+# Copyright 2017 The Bazel Authors. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#
+# A command rougly similar to git rebase that rebase on top of master
+# by cherry-picking all the patch that were not merged in master (using
+# Change-Id).
+#
+# The bazel tooling reformat source code and add some tags in the git
+# header so the patch-id is always different and rebasing always break.
+#
+
+set -eu
+
+master="master"
+cmd=rebase
+
+if [ "$#" -gt 1 ]; then
+  echo "Syntax: $0 (--continue|--abort|branch)?" >&2
+  exit 1
+fi
+
+if [ "$#" -gt 0 ]; then
+  case "${1}" in
+    --continue)
+      cmd=continue
+      ;;
+    --abort)
+      cmd=abort
+      ;;
+    *)
+      master="$1"
+      ;;
+  esac
+fi
+
+git_root=$(git rev-parse --show-toplevel)
+git_rb_file="${git_root}/.git/rb"
+
+generate_rb_file() {
+  echo "${branch}" > "${git_rb_file}"
+  echo "${master}" >> "${git_rb_file}"
+  echo "${hashes}" >> "${git_rb_file}"
+}
+
+case "$cmd" in
+  continue)
+    if [ ! -f "${git_rb_file}" ]; then
+      echo "Cannot continue a rebase, no in-flight rebase." >&2
+      exit 1
+    fi
+    if [ -e "${git_root}/.git/CHERRY_PICK_HEAD" ]; then
+      git cherry-pick --continue
+    fi
+    branch=$(head -n 1 "${git_rb_file}")
+    master=$(head -n 2 "${git_rb_file}" | tail -n 1) 
+    hashes="$(tail -n +3 "${git_rb_file}")"
+    ;;
+  abort)
+    if [ ! -f "${git_rb_file}" ]; then
+      echo "Cannot abort a rebase, no in-flight rebase." >&2
+      exit 1
+    fi
+    branch=$(head -n 1 "${git_rb_file}")
+    if [ -e "${git_root}/.git/CHERRY_PICK_HEAD" ]; then
+      git cherry-pick --abort
+    fi
+    git checkout "${branch}"
+    rm -f "${git_rb_file}"
+    exit 0
+    ;;
+  rebase)
+    if [ -f "${git_rb_file}" ]; then
+      echo "Cannot start a rebase, a rebase is already going on, either --abort or --continue." >&2
+      exit 1
+    fi
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    hashes="$(git log --reverse --pretty=format:%H "${master}"..HEAD)"
+    generate_rb_file
+    git checkout "${master}"
+    git checkout --detach
+  ;;
+esac
+
+cherry_pick() {
+ local hash="$1"
+ local master="$2"
+ local change_id_line="$(git show --pretty=format:%b "${hash}" | grep "Change-Id: ")"
+ if [ -n "${change_id_line}" ]; then
+   local change_id=$(echo "${change_id_line}" | cut -d ":" -f 2)
+   local res="$(git log --grep "${change_id_line}" --pretty=format:%H)"
+   if [ -n "${res}" ]; then
+     # Skip cherry-pick
+     echo "Skipping $hash (${change_id}), was submitted as $res"
+     return;
+   fi
+ fi
+ echo "Cherry-picking $hash"
+ git cherry-pick "$hash"
+}
+
+while [ ! -z "${hashes}" ]; do
+  hash=$(echo "${hashes}" | head -n 1)
+  hashes="$(echo "${hashes}" | tail -n +2)"
+  generate_rb_file
+  cherry_pick "${hash}" "${master}"
+done
+
+git checkout -B "${branch}"
+rm -f "${git_rb_file}"
+
